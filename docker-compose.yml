@@ -1,0 +1,119 @@
+# =============================================================================
+# Base stack: api + postgres + redis.
+#
+# This file describes the PRODUCTION-SHAPED stack. Development conveniences (hot
+# reload, mounted source, exposed database ports) live in docker-compose.override.yml,
+# which Docker Compose merges automatically when present. So `docker compose up` is
+# dev-friendly locally, while `docker compose -f docker-compose.yml up` on a server
+# gets the hardened configuration with no separate file to maintain.
+#
+# WHY HEALTHCHECKS ON EVERY SERVICE
+# Without them, `depends_on` only waits for the container to *start*, not to be
+# *usable*. Postgres accepts a TCP connection several seconds before it accepts
+# queries, so the API would boot, fail to migrate, and crash-loop. Healthchecks plus
+# `condition: service_healthy` turn "started" into "ready", which is what the
+# dependency actually means.
+# =============================================================================
+
+name: food-waste-app
+
+services:
+  # ------------------------------------------------------------------ postgres
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-app}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-app}
+      POSTGRES_DB: ${POSTGRES_DB:-foodwaste}
+      # scram-sha-256 rather than the default md5: md5 password hashing has been
+      # deprecated for years and is trivially crackable if the hash leaks.
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256"
+    volumes:
+      # A NAMED volume, not a bind mount. Named volumes are managed by Docker, work
+      # identically on Windows/macOS/Linux, and avoid the file-permission and
+      # fsync-performance problems bind-mounted database files have on Docker Desktop.
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      # `-U` and `-d` are required: without them pg_isready checks the wrong
+      # (default) database and can report ready before ours exists.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-app} -d ${POSTGRES_DB:-foodwaste}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    # No `ports:` here. The database is reachable only on the internal compose
+    # network, so it is not exposed to the host or to anything that can reach the
+    # host. docker-compose.override.yml publishes it for local tooling.
+    networks: [backend]
+
+  # --------------------------------------------------------------------- redis
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # `--appendonly yes` enables AOF persistence. Deliberate: the JWT denylist lives
+    # in Redis, and losing it on restart would silently un-revoke every logged-out
+    # token. Cache entries and rate-limit counters are expendable; revocations are
+    # not. AOF makes the durable-enough guarantee the security control needs.
+    #
+    # maxmemory-policy allkeys-lru: under memory pressure evict the least-recently-
+    # used key rather than start refusing writes. Correct here because the denylist
+    # is small and hot, so it survives; cold cache pages are what get dropped.
+    command: >
+      redis-server
+      --appendonly yes
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks: [backend]
+
+  # ----------------------------------------------------------------------- api
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    restart: unless-stopped
+    env_file:
+      # `make env` creates this from .env.example. Kept out of the image (see
+      # .dockerignore) so secrets are never baked into a layer.
+      - .env
+    environment:
+      # Overrides .env so the URLs use compose SERVICE NAMES rather than localhost.
+      # The same .env then works both inside compose and for a locally-run process,
+      # which is the usual source of "works on my machine" confusion here.
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:-app}@postgres:5432/${POSTGRES_DB:-foodwaste}
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres:
+        # The important line. `service_started` would let the API try to migrate
+        # against a database that is not accepting queries yet.
+        condition: service_healthy
+      redis:
+        # Redis is a hard dependency, not an optional extra: the JWT denylist fails
+        # CLOSED (see RedisTokenDenylist), so without Redis no request authenticates.
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    networks: [backend]
+    # Defence in depth for a process that is already non-root:
+    security_opt:
+      # Prevents the container from acquiring new privileges via setuid binaries.
+      - no-new-privileges:true
+    # NOTE: `read_only: true` would be the next hardening step, but it needs tmpfs
+    # mounts for /tmp and Python's bytecode paths. Left off rather than added
+    # half-configured — a broken hardening flag teaches the wrong lesson.
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  backend:
+    driver: bridge

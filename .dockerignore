@@ -1,0 +1,31 @@
+# Keep the build context small and the image free of host-only artifacts.
+# A smaller context also means fewer spurious cache invalidations.
+
+.git
+.gitignore
+.github
+
+# NEVER ship secrets into an image layer.
+.env
+.env.*
+!.env.example
+
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+tests/
+docs/
+*.md
+!README.md
+
+.idea/
+.vscode/
+.DS_Store

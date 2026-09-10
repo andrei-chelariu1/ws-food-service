@@ -1,0 +1,41 @@
+# Fail fast locally instead of in CI. `pre-commit install` once per clone.
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-added-large-files
+      - id: check-merge-conflict
+      # Two Alembic heads means `upgrade head` becomes ambiguous — catch it here.
+      - id: no-commit-to-branch
+        args: [--branch, main]
+      # Never let a real .env reach the repo.
+      - id: detect-private-key
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.7.4
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.13.0
+    hooks:
+      - id: mypy
+        # mypy needs the real dependency types to be useful, so mirror them here.
+        #
+        # DO NOT ADD `types-redis`. redis-py 5.x ships its own inline types
+        # (`py.typed`), and the third-party stubs are stale enough to contradict them —
+        # they report `Redis` as needing type arguments and claim `aclose()` does not
+        # exist. Adding them produces nine spurious strict-mode errors in correct code.
+        additional_dependencies:
+          - pydantic>=2.9
+          - pydantic-settings>=2.5
+          - sqlalchemy>=2.0
+          - fastapi>=0.115
+        args: [--config-file=pyproject.toml]
+        files: ^app/

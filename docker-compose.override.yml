@@ -1,0 +1,60 @@
+# =============================================================================
+# Development overrides. Docker Compose merges this on top of docker-compose.yml
+# AUTOMATICALLY whenever it is present.
+#
+# So:
+#   docker compose up                          -> base + these overrides (dev)
+#   docker compose -f docker-compose.yml up    -> base only (production shape)
+#
+# The value of this split: developer convenience never leaks into the production
+# configuration, and nobody has to maintain two near-identical full compose files
+# that drift apart. Everything below is something you specifically do NOT want on a
+# server.
+# =============================================================================
+
+services:
+  postgres:
+    ports:
+      # Published to the host so psql, DataGrip, or pgAdmin can connect directly.
+      # Absent from the base file on purpose: an exposed database port is one
+      # firewall mistake away from being an exposed database.
+      - "5432:5432"
+
+  redis:
+    ports:
+      # For redis-cli, and for inspecting what is actually in the cache and the
+      # denylist while debugging.
+      - "6379:6379"
+
+  api:
+    environment:
+      ENVIRONMENT: development
+      DEBUG: "true"
+      # Human-readable coloured logs instead of JSON. JSON is for log shippers;
+      # a developer reading a terminal wants the console renderer.
+      LOG_JSON: "false"
+      LOG_LEVEL: DEBUG
+      # Uncomment to see every SQL statement — invaluable for spotting an N+1, and
+      # far too noisy to leave on.
+      # DB_ECHO: "true"
+    volumes:
+      # Bind-mount the source for hot reload. Editing a file on the host restarts the
+      # server in the container, so there is no rebuild loop.
+      - ./app:/app/app
+      - ./migrations:/app/migrations
+      - ./tests:/app/tests
+      # NOTE: .venv is NOT mounted. Mounting the host's virtualenv over the
+      # container's would shadow Linux wheels with (possibly Windows) host ones —
+      # a confusing, hard-to-diagnose class of breakage.
+    command:
+      - uvicorn
+      - app.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      # Auto-restart on source changes. Never in production: it watches the
+      # filesystem continuously and runs a single worker.
+      - --reload
+      - --reload-dir
+      - /app/app
